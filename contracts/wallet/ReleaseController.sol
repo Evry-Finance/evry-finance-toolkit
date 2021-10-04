@@ -21,6 +21,7 @@ contract ReleaseController is Ownable, ReentrancyGuard {
   uint256 public releaseAmountPerPeriod;
   uint256 public released; // total distributed amount
   uint256 public nextReleaseBlock;
+  uint256 public gracePeriodBlock;
 
   event ReleaseToken(address indexed beneficiary, uint256 releaseTokenAmount, uint256 nextReleaseBlock);
 
@@ -31,7 +32,8 @@ contract ReleaseController is Ownable, ReentrancyGuard {
     uint256 _releaseAmount,
     uint256 _releasePeriod,
     uint256 _releaseFrequency, // monthly(30), daily(1)
-    uint256 _nextReleaseBlock
+    uint256 _nextReleaseBlock,
+    uint256 _gracePeriod // days
   ) {
     token = _token;
     beneficiary = _beneficiary;
@@ -39,6 +41,7 @@ contract ReleaseController is Ownable, ReentrancyGuard {
     releaseAmount = _releaseAmount;
     releaseAmountPerPeriod = _releaseAmount.div(_releasePeriod);
     nextReleaseBlock = _nextReleaseBlock;
+    gracePeriodBlock = _nextReleaseBlock.add((blockPerPeriod.mul(_releasePeriod)).add(_blockPerDay.mul(_gracePeriod)));
   }
 
   modifier onlyBeneficiary() {
@@ -61,10 +64,10 @@ contract ReleaseController is Ownable, ReentrancyGuard {
         releaseTokenAmount = walletBalance;
       }
 
-      token.safeTransfer(beneficiary, releaseTokenAmount);
-
       released = released.add(releaseTokenAmount);
       nextReleaseBlock = nextReleaseBlock.add(blockPerPeriod.mul(periodTimes));
+
+      token.safeTransfer(beneficiary, releaseTokenAmount);
 
       emit ReleaseToken(beneficiary, releaseTokenAmount, nextReleaseBlock);
     }
@@ -80,5 +83,11 @@ contract ReleaseController is Ownable, ReentrancyGuard {
     uint256 totalBalance = token.balanceOf(address(this)).add(released);
     require(totalBalance > releaseAmount, "ReleaseController: balance is not exceed");
     token.safeTransfer(_to, totalBalance.sub(releaseAmount));
+  }
+
+  function recoverAmountExceedGracePeriod(address _to) external onlyOwner {
+    require(block.number >= gracePeriodBlock, "ReleaseController: not exceed grace period yet");
+    require(_to != address(0), "ReleaseController: cannot recover amount to zero address");
+    token.safeTransfer(_to, token.balanceOf(address(this)));
   }
 }

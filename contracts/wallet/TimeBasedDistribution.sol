@@ -50,6 +50,7 @@ contract TimeBasedDistribution is Ownable, ReentrancyGuard {
   address[] private members;
   uint256 public totalAllocation;
   uint256 public lastReleaseBlock;
+  uint256 public gracePeriodBlock;
 
   constructor(
     IERC20 _token,
@@ -60,8 +61,11 @@ contract TimeBasedDistribution is Ownable, ReentrancyGuard {
     uint256 _maxAllocation,
     uint256 _distributionCap,
     uint256 _distributionTimes,
-    uint256 _jackpotDistributionTimes
+    uint256 _jackpotDistributionTimes,
+    uint256 _gracePeriod // days
   ) {
+    require(_minAllocation >= 1, "TimebasedDistribution: minimum allocation cannot be lower than 1");
+    require(_minAllocation <= _maxAllocation, "TimebasedDistribution: minimum allocation cannot be greater than maximum allocation");
     token = _token;
     paymentPeriodInBlock = _paymentPeriodInBlock;
     lastUpdateBlock = _lastUpdateBlock;
@@ -80,6 +84,9 @@ contract TimeBasedDistribution is Ownable, ReentrancyGuard {
 
     // prevent distribute reward after last distribution block
     lastReleaseBlock = distributionTimes.mul(paymentPeriodInBlock).add(nextUpdateBlock);
+
+    // expect paymentPeriodInBlock to be daily bsc(28800), eth(6500)
+    gracePeriodBlock = lastReleaseBlock.add(paymentPeriodInBlock.mul(_gracePeriod));
   }
 
   function transferExceedAmount(address _to) external onlyOwner {
@@ -87,6 +94,12 @@ contract TimeBasedDistribution is Ownable, ReentrancyGuard {
     uint256 totalBalance = token.balanceOf(address(this)).add(totalDistributed);
     require(totalBalance > distributionCap, "TimeBasedDistribution: balance is not exceed");
     token.safeTransfer(_to, totalBalance.sub(distributionCap));
+  }
+
+  function recoverAmountExceedGracePeriod(address _to) external onlyOwner {
+    require(block.number >= gracePeriodBlock, "TimeBasedDistribution: not exceed grace period yet");
+    require(_to != address(0), "TimeBasedDistribution: cannot recover amount to zero address");
+    token.safeTransfer(_to, token.balanceOf(address(this)));
   }
 
   function addMember(address _memberAddress, uint256 _allocation) external onlyOwner {
@@ -233,6 +246,7 @@ contract TimeBasedDistribution is Ownable, ReentrancyGuard {
       if (members[i] == _memberAddress) {
         members[i] = members[members.length - 1];
         members.pop();
+        break;
       }
     }
 

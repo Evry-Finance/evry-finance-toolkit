@@ -25,10 +25,12 @@ contract PerformanceDistribution is Ownable, ReentrancyGuard {
   uint256 public blockPerDay; // BSC 28800, ETH 6500
   uint256 public distributionPeriod; // monthly(12), daily(365)
   uint256 public distributionFrequency; // monthly(30), daily(1)
+  uint256 public blockPerPeriod;
   uint256 public distributionCap; // total amount to distribute
   uint256 public distributionBalance; // avaliable amount to add reward
   uint256 public distributed; // total distributed amount
   uint256 public nextDistributionBlock;
+  uint256 public gracePeriodBlock;
 
   mapping(address => DistributionInfo[]) public distributionInfo;
   address[] private members;
@@ -43,15 +45,18 @@ contract PerformanceDistribution is Ownable, ReentrancyGuard {
     uint256 _blockPerDay,
     uint256 _distributionFrequency,
     uint256 _distributionPeriod,
-    uint256 _nextDistributionBlock
+    uint256 _nextDistributionBlock,
+    uint256 _gracePeriod // days
   ) {
     token = _token;
     distributionCap = _distributionCap;
     distributionBalance = _distributionCap;
     blockPerDay = _blockPerDay;
+    blockPerPeriod = _blockPerDay.mul(_distributionFrequency);
     distributionFrequency = _distributionFrequency;
     distributionPeriod = _distributionPeriod;
     nextDistributionBlock = _nextDistributionBlock;
+    gracePeriodBlock = _nextDistributionBlock.add(blockPerPeriod.mul(_distributionPeriod)).add(_blockPerDay.mul(_gracePeriod));
   }
 
   function memberLength() external view returns (uint256) {
@@ -67,8 +72,8 @@ contract PerformanceDistribution is Ownable, ReentrancyGuard {
     require(distributionBalance >= amount, "addReward:: exceed balance");
     require(_for != address(0), "addReward: invalid address");
 
-    uint256 minimumLastUpdateBlock = block.number.sub(blockPerDay.mul(distributionFrequency));
-    uint256 maximumLastUpdateBlock = block.number.add(blockPerDay.mul(distributionFrequency));
+    uint256 minimumLastUpdateBlock = block.number.sub(blockPerPeriod);
+    uint256 maximumLastUpdateBlock = block.number.add(blockPerPeriod);
     require(lastUpdateBlock >= minimumLastUpdateBlock, "addReward: exceed min lastUpdateBlock");
     require(lastUpdateBlock <= maximumLastUpdateBlock, "addReward: exceed max lastUpdateBlock");
 
@@ -83,7 +88,7 @@ contract PerformanceDistribution is Ownable, ReentrancyGuard {
         amount: amount,
         remainingAmount: amount,
         rewardPerPeriod: rewardPerPeriod,
-        lastUpdateBlock: block.number
+        lastUpdateBlock: lastUpdateBlock
       })
     );
 
@@ -93,19 +98,24 @@ contract PerformanceDistribution is Ownable, ReentrancyGuard {
   }
 
   function distributeReward() external nonReentrant {
-    require(block.number >= nextDistributionBlock, "distributeReward: already update");
+    require(
+      block.number >= nextDistributionBlock,
+      "distributeReward: unable to claim token due to it is in a lock period"
+    );
 
     // get remaining period
-    uint256 periodTimes = _getPeriodTimes(block.number.sub(nextDistributionBlock), 1);
+    uint256 periodTimes = _getPeriodTimes(nextDistributionBlock);
+    require(
+      periodTimes > 0,
+      "distributeReward: unable to claim token due to it is not reach its distribution timeframe"
+    );
+
+    // update block before next period distribution
+    nextDistributionBlock = nextDistributionBlock.add(blockPerPeriod.mul(periodTimes));
 
     // distribute by one period * remaining period (times)
-    for (uint256 i = 0; i < periodTimes; i++) {
-      for (uint256 j = 0; j < members.length; j++) {
-        _distributeReward(members[j]);
-      }
-
-      // update block before next period distribution
-      nextDistributionBlock = nextDistributionBlock.add(blockPerDay.mul(distributionFrequency));
+    for (uint256 i = 0; i < members.length; i++) {
+      _distributeReward(members[i]);
     }
   }
 
@@ -113,29 +123,34 @@ contract PerformanceDistribution is Ownable, ReentrancyGuard {
     DistributionInfo[] storage distribution = distributionInfo[_for];
 
     for (uint256 i = 0; i < distribution.length; i++) {
-      if (distribution[i].lastUpdateBlock <= nextDistributionBlock && distribution[i].remainingAmount > 0) {
-        uint256 reward = distribution[i].rewardPerPeriod;
-        uint256 remainingAmount = distribution[i].remainingAmount.sub(reward);
+      uint256 periodTimes = _getPeriodTimes(distribution[i].lastUpdateBlock);
 
-        token.safeTransfer(_for, reward);
-        distributed = distributed.add(reward);
+      if (periodTimes > 0 && distribution[i].remainingAmount > 0) {
+        uint256 reward = distribution[i].rewardPerPeriod.mul(periodTimes);
+        if (reward > distribution[i].remainingAmount) {
+          reward = distribution[i].remainingAmount;
+        }
+
+        uint256 remainingAmount = distribution[i].remainingAmount.sub(reward);
 
         distribution[i].remainingAmount = remainingAmount;
         distribution[i].lastUpdateBlock = nextDistributionBlock;
+        distributed = distributed.add(reward);
 
+        token.safeTransfer(_for, reward);
+        
         emit LogDistributeReward(_for, reward, remainingAmount);
       }
     }
   }
 
-  function _getPeriodTimes(uint256 blockNum, uint256 times) internal returns (uint256) {
-    uint256 blockPerPeriod = blockPerDay.mul(distributionFrequency);
-
-    if (blockPerPeriod.mul(times) <= blockNum) {
-      return _getPeriodTimes(blockNum, times.add(1));
-    } else {
-      return times;
+  function _getPeriodTimes(uint256 fromBlock) internal returns (uint256) {
+    if (block.number < fromBlock) {
+      return 0;
     }
+
+    uint256 blocks = block.number.sub(fromBlock);
+    return blocks.div(blockPerPeriod);
   }
 
   function removeMember(address _for) external nonReentrant onlyOwner {
@@ -160,6 +175,7 @@ contract PerformanceDistribution is Ownable, ReentrancyGuard {
       if (members[i] == _for) {
         members[i] = members[members.length - 1];
         members.pop();
+        break;
       }
     }
   }
@@ -196,5 +212,11 @@ contract PerformanceDistribution is Ownable, ReentrancyGuard {
     uint256 totalBalance = token.balanceOf(address(this)).add(distributed);
     require(totalBalance > distributionCap, "PerformanceDistribution: balance is not exceed");
     token.safeTransfer(_to, totalBalance.sub(distributionCap));
+  }
+
+  function recoverAmountExceedGracePeriod(address _to) external onlyOwner {
+    require(block.number >= gracePeriodBlock, "PerformanceDistribution: not exceed grace period yet");
+    require(_to != address(0), "PerformanceDistribution: cannot recover amount to zero address");
+    token.safeTransfer(_to, token.balanceOf(address(this)));
   }
 }
